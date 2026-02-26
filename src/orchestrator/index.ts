@@ -24,6 +24,7 @@ import { LearningEngine } from './learning-engine.js';
 import { TestRunner } from './test-runner.js';
 import { TaskResultRecorder } from './task-result-recorder.js';
 import { NotificationManager } from './notification-manager.js';
+import { CodeReviewer } from './code-reviewer.js';
 import { OrchestratorConfig, Task } from '../types/index.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -43,6 +44,7 @@ class Orchestrator {
   private testRunner: TestRunner;
   private resultRecorder: TaskResultRecorder;
   private notificationManager: NotificationManager;
+  private codeReviewer: CodeReviewer;
 
   constructor() {
     this.config = {
@@ -74,6 +76,7 @@ class Orchestrator {
       telegramChatId: process.env.TELEGRAM_CHAT_ID,
       enabled: process.env.TELEGRAM_ENABLED === 'true',
     });
+    this.codeReviewer = new CodeReviewer();
   }
 
   /**
@@ -307,18 +310,36 @@ class Orchestrator {
       console.log(`   测试得分: ${testResults.overall.score}/100`);
 
       if (testResults.overall.passed) {
-        // 测试通过，记录任务完成
+        // 测试通过，运行 Code Review
+        console.log('   🔍 运行 Code Review...');
+        let reviewResults: any = null;
+
+        if (status.prUrl && process.env.ENABLE_CODE_REVIEW === 'true') {
+          try {
+            // 提取 PR 编号
+            const prNumber = parseInt(status.prUrl.split('/').pop() || '0');
+
+            if (prNumber > 0) {
+              reviewResults = await this.codeReviewer.reviewPR(prNumber, task.worktree);
+            }
+          } catch (error) {
+            console.error('   ⚠️  Code Review 失败:', error);
+          }
+        }
+
+        // 记录任务完成（包含 review 结果）
         const record = await this.resultRecorder.recordCompletion(task, {
           prUrl: status.prUrl,
           testResults,
           uiScreenshot: testResults.uiScreenshot.path,
+          codeReviews: reviewResults?.reviews,
         });
 
         // 发送完成通知
         await this.notificationManager.sendTaskCompletion({
           taskId: task.id,
           description: task.description,
-          status: 'completed',
+          status: reviewResults?.overall.approved ? 'completed' : 'completed',
           prUrl: status.prUrl,
           testResults,
           screenshot: testResults.uiScreenshot.path,

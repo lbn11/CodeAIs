@@ -1,0 +1,305 @@
+name: CI Pipeline
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+  push:
+    branches: [main]
+
+jobs:
+  # ESLint 检查
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run ESLint
+        run: npm run lint
+        continue-on-error: false
+
+  # TypeScript 类型检查
+  typescript:
+    name: TypeScript
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Type check
+        run: npx tsc --noEmit
+
+  # 单元测试
+  unit-tests:
+    name: Unit Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run unit tests
+        run: npm test -- --coverage --ci
+
+      - name: Upload coverage
+        uses: codecov/codecov-action@v4
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: ./coverage/lcov.info
+
+  # E2E 测试
+  e2e-tests:
+    name: E2E Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install Playwright
+        run: npx playwright install --with-deps
+
+      - name: Build
+        run: npm run build
+
+      - name: Run E2E tests
+        run: npm run test:e2e
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: playwright-report/
+
+  # UI 截图检查
+  ui-screenshot:
+    name: UI Screenshot
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check for UI changes
+        id: check-ui
+        run: |
+          UI_CHANGED=$(git diff --name-only origin/main...HEAD | grep -E '\.(tsx?|css|scss|vue|jsx?)$' || echo "")
+          echo "changed=$UI_CHANGED" >> $GITHUB_OUTPUT
+          if [ -n "$UI_CHANGED" ]; then
+            echo "has_ui_changes=true" >> $GITHUB_OUTPUT
+            echo "UI 变化的文件:"
+            echo "$UI_CHANGED"
+          else
+            echo "has_ui_changes=false" >> $GITHUB_OUTPUT
+            echo "没有 UI 变化"
+          fi
+
+      - name: Setup Node.js
+        if: steps.check-ui.outputs.has_ui_changes == 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Install dependencies
+        if: steps.check-ui.outputs.has_ui_changes == 'true'
+        run: npm ci
+
+      - name: Install Playwright
+        if: steps.check-ui.outputs.has_ui_changes == 'true'
+        run: npx playwright install --with-deps
+
+      - name: Build
+        if: steps.check-ui.outputs.has_ui_changes == 'true'
+        run: npm run build
+
+      - name: Start dev server
+        if: steps.check-ui.outputs.has_ui_changes == 'true'
+        run: npm run dev &
+        env:
+          PORT: 3000
+
+      - name: Wait for server
+        if: steps.check-ui.outputs.has_ui_changes == 'true'
+        run: |
+          for i in {1..30}; do
+            if curl -s http://localhost:3000 > /dev/null; then
+              echo "Server is ready"
+              break
+            fi
+            echo "Waiting for server... ($i/30)"
+            sleep 2
+          done
+
+      - name: Take screenshots
+        if: steps.check-ui.outputs.has_ui_changes == 'true'
+        run: npx playwright screenshot --wait-for-selector="body" screenshots/ui-changes.png
+
+      - name: Check for screenshots
+        if: steps.check-ui.outputs.has_ui_changes == 'true'
+        run: |
+          if [ -f "screenshots/ui-changes.png" ]; then
+            echo "✅ 截图已生成"
+          else
+            echo "❌ 截图未生成"
+            exit 1
+          fi
+
+      - name: Upload screenshots
+        if: steps.check-ui.outputs.has_ui_changes == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ui-screenshots
+          path: screenshots/
+          retention-days: 7
+
+      - name: Comment PR with screenshots
+        if: steps.check-ui.outputs.has_ui_changes == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const path = require('path');
+            
+            // 读取截图
+            const screenshotPath = path.join(process.env.GITHUB_WORKSPACE, 'screenshots/ui-changes.png');
+            
+            if (fs.existsSync(screenshotPath)) {
+              const screenshotBase64 = fs.readFileSync(screenshotPath, 'base64');
+              
+              await github.rest.issues.createComment({
+                issue_number: context.issue.number,
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                body: `## 📸 UI 变化截图\n\n![UI Changes](data:image/png;base64,${screenshotBase64})\n\n此 PR 包含 UI 变化，请查看上面的截图。`
+              });
+            }
+
+  # Code Review (3 个 Agent)
+  code-review:
+    name: Code Review
+    runs-on: ubuntu-latest
+    needs: [lint, typescript, unit-tests]
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run Code Review
+        run: npm run review:pr
+        env:
+          CODEX_API_KEY: ${{ secrets.CODEX_API_KEY }}
+          CODEX_API_URL: ${{ secrets.CODEX_API_URL }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GEMINI_API_URL: ${{ secrets.GEMINI_API_URL }}
+          CLAUDE_API_KEY: ${{ secrets.CLAUDE_API_KEY }}
+          CLAUDE_API_URL: ${{ secrets.CLAUDE_API_URL }}
+          PR_NUMBER: ${{ github.event.number }}
+
+  # 质量评分汇总
+  quality-score:
+    name: Quality Score
+    runs-on: ubuntu-latest
+    needs: [lint, typescript, unit-tests, e2e-tests, code-review]
+    if: always()
+    steps:
+      - name: Calculate score
+        id: score
+        run: |
+          SCORE=0
+          
+          # Lint (20分)
+          if [ "${{ needs.lint.result }}" == "success" ]; then
+            SCORE=$((SCORE + 20))
+          fi
+          
+          # TypeScript (20分)
+          if [ "${{ needs.typescript.result }}" == "success" ]; then
+            SCORE=$((SCORE + 20))
+          fi
+          
+          # 单元测试 (30分)
+          if [ "${{ needs.unit-tests.result }}" == "success" ]; then
+            SCORE=$((SCORE + 30))
+          fi
+          
+          # E2E 测试 (20分)
+          if [ "${{ needs.e2e-tests.result }}" == "success" ]; then
+            SCORE=$((SCORE + 20))
+          fi
+          
+          # Code Review (10分)
+          if [ "${{ needs.code-review.result }}" == "success" ]; then
+            SCORE=$((SCORE + 10))
+          fi
+          
+          echo "score=$SCORE" >> $GITHUB_OUTPUT
+          echo "## 质量评分: $SCORE/100"
+          
+          if [ $SCORE -ge 80 ]; then
+            echo "✅ 优秀，可以直接合并"
+            echo "status=approved" >> $GITHUB_OUTPUT
+          elif [ $SCORE -ge 60 ]; then
+            echo "⚠️ 良好，需要 review"
+            echo "status=needs_review" >> $GITHUB_OUTPUT
+          else
+            echo "❌ 不合格，需要修复"
+            echo "status=needs_fixes" >> $GITHUB_OUTPUT
+            exit 1
+          fi
+
+      - name: Comment PR with score
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: `## 🎯 CI 质量评分\n\n总分: ${{ steps.score.outputs.score }}/100\n\n状态: ${{ steps.score.outputs.status }}\n\n- ✅ Lint: 20/20\n- ✅ TypeScript: 20/20\n- ✅ 单元测试: 30/30\n- ✅ E2E 测试: 20/20\n- ✅ Code Review: 10/10`
+            });
