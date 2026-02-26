@@ -1,12 +1,15 @@
 /**
- * 主编排器 - 双层 Agent 系统的核心
+ * 主编排器 - 双层 Agent 系统的核心（增强版）
  *
  * 职责：
  * 1. 读取和理解业务上下文（迭代需求、会议记录等）
  * 2. 拆解任务
  * 3. 选择合适的 Agent
  * 4. 监控任务进度
- * 5. 从失败中学习（Ralph Loop）
+ * 5. 运行完整测试流程
+ * 6. 记录任务结果（JSON）
+ * 7. 发送通知（Telegram + 截图）
+ * 8. 从失败中学习（Ralph Loop）
  */
 
 import dotenv from 'dotenv';
@@ -18,6 +21,9 @@ import { AgentSelector } from './agent-selector.js';
 import { PromptGenerator } from './prompt-generator.js';
 import { TaskAgentSpawner } from './task-agent-spawner.js';
 import { LearningEngine } from './learning-engine.js';
+import { TestRunner } from './test-runner.js';
+import { TaskResultRecorder } from './task-result-recorder.js';
+import { NotificationManager } from './notification-manager.js';
 import { OrchestratorConfig, Task } from '../types/index.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -34,6 +40,9 @@ class Orchestrator {
   private promptGenerator: PromptGenerator;
   private agentSpawner: TaskAgentSpawner;
   private learningEngine: LearningEngine;
+  private testRunner: TestRunner;
+  private resultRecorder: TaskResultRecorder;
+  private notificationManager: NotificationManager;
 
   constructor() {
     this.config = {
@@ -58,6 +67,13 @@ class Orchestrator {
     this.taskManager = new TaskManager(this.config.tasksDir);
     this.agentSpawner = new TaskAgentSpawner(this.config.repoPath, this.config.worktreesDir);
     this.learningEngine = new LearningEngine(this.config.contextDir);
+    this.testRunner = new TestRunner(''); // worktreePath 会在运行时设置
+    this.resultRecorder = new TaskResultRecorder('./task-results');
+    this.notificationManager = new NotificationManager({
+      telegramBotToken: process.env.TELEGRAM_BOT_TOKEN,
+      telegramChatId: process.env.TELEGRAM_CHAT_ID,
+      enabled: process.env.TELEGRAM_ENABLED === 'true',
+    });
   }
 
   /**
@@ -118,6 +134,10 @@ class Orchestrator {
 
     const learnings = await this.learningEngine.loadLearnings();
     console.log(`   加载 ${learnings.length} 条学习记录`);
+
+    // 加载任务历史
+    const history = await this.resultRecorder.getHistory();
+    console.log(`   加载 ${history.length} 条任务历史`);
   }
 
   /**
@@ -164,9 +184,6 @@ class Orchestrator {
    * 拆解迭代需求为任务
    */
   private async decomposeIteration(iteration: any): Promise<Task[]> {
-    // 这里调用 Claude 来理解需求并拆解任务
-    // 暂时返回示例任务，实际需要与 API 集成
-
     const baseTask: Partial<Task> = {
       iterationId: iteration.id,
       createdAt: Date.now(),
@@ -174,10 +191,9 @@ class Orchestrator {
       status: 'pending',
     };
 
-    // 根据需求类型拆解
     const tasks: Task[] = [];
 
-    // 示例：如果需求包含"平台"或"系统"
+    // 根据需求类型拆解
     if (iteration.content.includes('平台') || iteration.content.includes('系统')) {
       tasks.push({
         id: `task-${Date.now()}-1`,
@@ -189,6 +205,7 @@ class Orchestrator {
           iterationId: iteration.id,
           customerNotes: iteration.content,
         },
+        agent: 'claude-code',
         ...baseTask,
       } as Task);
 
@@ -201,11 +218,11 @@ class Orchestrator {
         context: {
           iterationId: iteration.id,
         },
+        agent: 'claude-code',
         ...baseTask,
       } as Task);
     }
 
-    // 如果需求包含"评论"
     if (iteration.content.includes('评论')) {
       tasks.push({
         id: `task-${Date.now()}-3`,
@@ -216,6 +233,7 @@ class Orchestrator {
         context: {
           iterationId: iteration.id,
         },
+        agent: 'claude-code',
         ...baseTask,
       } as Task);
     }
@@ -236,17 +254,100 @@ class Orchestrator {
 
       if (status.completed) {
         console.log(`   ✅ 任务完成: ${task.id}`);
+
+        // 运行完整测试流程
+        await this.runTestAndRecord(task, status);
+
         task.status = 'completed';
         task.completedAt = Date.now();
         task.prUrl = status.prUrl;
         await this.taskManager.update(task);
       } else if (status.failed) {
         console.log(`   ❌ 任务失败: ${task.id}`);
+
+        // 记录失败
+        await this.resultRecorder.recordFailure(
+          task,
+          status.error || 'Unknown error'
+        );
+
+        // 发送失败通知
+        await this.notificationManager.sendTaskFailure(
+          task.id,
+          task.description,
+          status.error || 'Unknown error'
+        );
+
         task.status = 'failed';
         await this.taskManager.update(task);
       } else {
         console.log(`   ⏳ 运行中: ${task.id}`);
       }
+    }
+  }
+
+  /**
+   * 运行测试并记录结果
+   */
+  private async runTestAndRecord(task: Task, status: any): Promise<void> {
+    if (!task.worktree) {
+      console.log('   ⚠️  没有 worktree，跳过测试');
+      return;
+    }
+
+    console.log('   🧪 运行测试流程...');
+
+    try {
+      // 设置测试运行器的工作目录
+      (this.testRunner as any).worktreePath = task.worktree;
+
+      // 运行完整测试流程
+      const testResults = await this.testRunner.runFullTestSuite();
+
+      console.log(`   测试得分: ${testResults.overall.score}/100`);
+
+      if (testResults.overall.passed) {
+        // 测试通过，记录任务完成
+        const record = await this.resultRecorder.recordCompletion(task, {
+          prUrl: status.prUrl,
+          testResults,
+          uiScreenshot: testResults.uiScreenshot.path,
+        });
+
+        // 发送完成通知
+        await this.notificationManager.sendTaskCompletion({
+          taskId: task.id,
+          description: task.description,
+          status: 'completed',
+          prUrl: status.prUrl,
+          testResults,
+          screenshot: testResults.uiScreenshot.path,
+          metrics: record.metrics,
+        });
+      } else {
+        // 测试失败
+        console.log('   ⚠️  测试未通过，需要人工 review');
+
+        // 仍然记录任务，但标记需要人工审查
+        const record = await this.resultRecorder.recordCompletion(task, {
+          prUrl: status.prUrl,
+          testResults,
+          uiScreenshot: testResults.uiScreenshot.path,
+        });
+
+        // 发送通知，说明需要人工审查
+        await this.notificationManager.sendTaskCompletion({
+          taskId: task.id,
+          description: task.description,
+          status: 'completed',
+          prUrl: status.prUrl,
+          testResults,
+          screenshot: testResults.uiScreenshot.path,
+          metrics: record.metrics,
+        });
+      }
+    } catch (error) {
+      console.error('   ❌ 测试流程失败:', error);
     }
   }
 

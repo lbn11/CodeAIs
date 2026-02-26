@@ -9,7 +9,8 @@
     "start": "node dist/orchestrator/index.js",
     "orchestrator": "ts-node src/orchestrator/index.ts",
     "monitor": "node dist/monitors/task-monitor.js",
-    "test": "jest",
+    "health-check": "node dist/monitors/health-check.js",
+    "test": "node dist/orchestrator/test-runner.js",
     "setup": "bash scripts/setup.sh",
     "worktree:create": "bash scripts/worktree-manager.sh create",
     "worktree:clean": "bash scripts/worktree-manager.sh clean",
@@ -28,7 +29,8 @@
     "@anthropic-ai/sdk": "^0.24.3",
     "dotenv": "^16.4.5",
     "chokidar": "^3.6.0",
-    "axios": "^1.7.2"
+    "axios": "^1.7.2",
+    "form-data": "^4.0.0"
   },
   "devDependencies": {
     "@types/node": "^20.14.9",
