@@ -1,0 +1,105 @@
+{
+  "agents": {
+    "claude-code": {
+      "type": "claude-code",
+      "name": "Claude Code",
+      "description": "快速型选手，擅长前端工作和快速迭代",
+      "strengths": [
+        "前端开发",
+        "快速原型",
+        "UI 组件",
+        "文档编写"
+      ],
+      "weaknesses": [
+        "复杂后端逻辑",
+        "大规模重构"
+      ],
+      "model": "claude-opus-4.5",
+      "maxTokens": 100000,
+      "temperature": 0.7
+    },
+    "codex": {
+      "type": "codex",
+      "name": "Codex",
+      "description": "主力选手，擅长复杂后端逻辑和多文件重构",
+      "strengths": [
+        "后端逻辑",
+        "复杂 bug 修复",
+        "多文件重构",
+        "跨代码库推理"
+      ],
+      "weaknesses": [
+        "速度较慢",
+        "成本较高"
+      ],
+      "model": "gpt-5.3-codex",
+      "maxTokens": 200000,
+      "temperature": 0.5
+    },
+    "gemini": {
+      "type": "gemini",
+      "name": "Gemini",
+      "description": "设计师，擅长 UI 设计和视觉工作",
+      "strengths": [
+        "UI 设计",
+        "视觉美观",
+        "HTML/CSS 规范",
+        "用户体验"
+      ],
+      "weaknesses": [
+        "复杂逻辑",
+        "代码质量"
+      ],
+      "model": "gemini-2.5-pro",
+      "maxTokens": 100000,
+      "temperature": 0.8
+    }
+  },
+  "taskTypes": {
+    "feature": {
+      "defaultAgent": "codex",
+      "description": "新功能开发"
+    },
+    "bugfix": {
+      "defaultAgent": "codex",
+      "description": "Bug 修复"
+    },
+    "refactor": {
+      "defaultAgent": "codex",
+      "description": "代码重构"
+    },
+    "design": {
+      "defaultAgent": "gemini",
+      "description": "UI/UX 设计"
+    },
+    "test": {
+      "defaultAgent": "claude-code",
+      "description": "测试开发"
+    },
+    "docs": {
+      "defaultAgent": "claude-code",
+      "description": "文档编写"
+    }
+  },
+  "monitoring": {
+    "intervalMinutes": 10,
+    "maxRetries": 3,
+    "taskTimeoutMinutes": 60
+  },
+  "learning": {
+    "enabled": true,
+    "maxHistory": 100,
+    "patterns": {
+      "success": [
+        "使用 TypeScript 类型定义",
+        "编写完整的测试",
+        "遵循代码风格指南"
+      ],
+      "failure": [
+        "缺少上下文信息",
+        "忽略边界情况",
+        "测试不充分"
+      ]
+    }
+  }
+}

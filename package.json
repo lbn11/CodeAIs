@@ -1,0 +1,40 @@
+{
+  "name": "agent-cluster-system",
+  "version": "1.0.0",
+  "description": "OpenClaw + Claude Code 双层 Agent 集群系统",
+  "main": "dist/orchestrator/index.js",
+  "scripts": {
+    "build": "tsc",
+    "dev": "ts-node src/orchestrator/index.ts",
+    "start": "node dist/orchestrator/index.js",
+    "orchestrator": "ts-node src/orchestrator/index.ts",
+    "monitor": "node dist/monitors/task-monitor.js",
+    "test": "jest",
+    "setup": "bash scripts/setup.sh",
+    "worktree:create": "bash scripts/worktree-manager.sh create",
+    "worktree:clean": "bash scripts/worktree-manager.sh clean",
+    "agent:start": "bash scripts/start-agent.sh"
+  },
+  "keywords": [
+    "ai",
+    "agent",
+    "orchestrator",
+    "claude-code",
+    "automation"
+  ],
+  "author": "爸爸的AI助手",
+  "license": "MIT",
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.24.3",
+    "dotenv": "^16.4.5",
+    "chokidar": "^3.6.0",
+    "axios": "^1.7.2"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.9",
+    "typescript": "^5.5.3",
+    "ts-node": "^10.9.2",
+    "jest": "^29.7.0",
+    "@types/jest": "^29.5.12"
+  }
+}

@@ -1,0 +1,302 @@
+/**
+ * 主编排器 - 双层 Agent 系统的核心
+ *
+ * 职责：
+ * 1. 读取和理解业务上下文（迭代需求、会议记录等）
+ * 2. 拆解任务
+ * 3. 选择合适的 Agent
+ * 4. 监控任务进度
+ * 5. 从失败中学习（Ralph Loop）
+ */
+
+import dotenv from 'dotenv';
+import path from 'path';
+import { fileURLToPath } from 'url';
+import { TaskManager } from './task-manager.js';
+import { ContextLoader } from './context-loader.js';
+import { AgentSelector } from './agent-selector.js';
+import { PromptGenerator } from './prompt-generator.js';
+import { TaskAgentSpawner } from './task-agent-spawner.js';
+import { LearningEngine } from './learning-engine.js';
+import { OrchestratorConfig, Task } from '../types/index.js';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+// 加载环境变量
+dotenv.config({ path: path.join(__dirname, '../../.env') });
+
+class Orchestrator {
+  private config: OrchestratorConfig;
+  private taskManager: TaskManager;
+  private contextLoader: ContextLoader;
+  private agentSelector: AgentSelector;
+  private promptGenerator: PromptGenerator;
+  private agentSpawner: TaskAgentSpawner;
+  private learningEngine: LearningEngine;
+
+  constructor() {
+    this.config = {
+      repoPath: process.env.OPENCLAW_REPO || process.cwd(),
+      worktreesDir: process.env.WORKTREES_DIR || './worktrees',
+      tasksDir: './tasks/active',
+      contextDir: './context',
+      monitorInterval: parseInt(process.env.MONITOR_INTERVAL_MINUTES || '10') * 60 * 1000,
+      maxRetries: parseInt(process.env.MAX_RETRIES || '3'),
+      defaultAgent: (process.env.DEFAULT_AGENT as any) || 'claude-code',
+    };
+
+    console.log('🤖 初始化编排器...');
+    console.log(`   仓库路径: ${this.config.repoPath}`);
+    console.log(`   Worktrees: ${this.config.worktreesDir}`);
+    console.log(`   监控间隔: ${this.config.monitorInterval / 60000} 分钟`);
+
+    // 初始化各模块
+    this.contextLoader = new ContextLoader(this.config.contextDir);
+    this.agentSelector = new AgentSelector();
+    this.promptGenerator = new PromptGenerator();
+    this.taskManager = new TaskManager(this.config.tasksDir);
+    this.agentSpawner = new TaskAgentSpawner(this.config.repoPath, this.config.worktreesDir);
+    this.learningEngine = new LearningEngine(this.config.contextDir);
+  }
+
+  /**
+   * 主循环 - 持续监控和处理任务
+   */
+  async start(): Promise<void> {
+    console.log('\n🚀 编排器启动，开始运行...\n');
+
+    // 首次加载上下文
+    await this.loadContext();
+
+    // 启动监控循环
+    setInterval(async () => {
+      await this.monitorAndProcess();
+    }, this.config.monitorInterval);
+
+    // 立即执行一次
+    await this.monitorAndProcess();
+  }
+
+  /**
+   * 监控和处理循环
+   */
+  private async monitorAndProcess(): Promise<void> {
+    try {
+      console.log('\n' + '='.repeat(50));
+      console.log(`⏰ ${new Date().toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' })} - 开始监控`);
+
+      // 1. 检查新的迭代需求
+      await this.processNewIterations();
+
+      // 2. 检查正在运行的任务
+      await this.monitorRunningTasks();
+
+      // 3. 检查失败的任务，尝试重试（应用学习）
+      await this.retryFailedTasks();
+
+      // 4. 学习和改进
+      await this.learnFromResults();
+
+      console.log('✅ 监控周期完成\n');
+    } catch (error) {
+      console.error('❌ 监控错误:', error);
+    }
+  }
+
+  /**
+   * 加载业务上下文
+   */
+  private async loadContext(): Promise<void> {
+    console.log('\n📚 加载业务上下文...');
+
+    const iterations = await this.contextLoader.loadIterations();
+    console.log(`   找到 ${iterations.length} 个迭代需求`);
+
+    const decisions = await this.contextLoader.loadDecisions();
+    console.log(`   加载 ${decisions.length} 个历史决策`);
+
+    const learnings = await this.learningEngine.loadLearnings();
+    console.log(`   加载 ${learnings.length} 条学习记录`);
+  }
+
+  /**
+   * 处理新的迭代需求
+   */
+  private async processNewIterations(): Promise<void> {
+    const iterations = await this.contextLoader.loadUnprocessedIterations();
+
+    for (const iteration of iterations) {
+      console.log(`\n📝 处理迭代需求: ${iteration.id}`);
+      console.log(`   内容: ${iteration.content.substring(0, 100)}...`);
+
+      // 拆解任务
+      const tasks = await this.decomposeIteration(iteration);
+
+      // 为每个任务选择 Agent 并启动
+      for (const task of tasks) {
+        console.log(`   拆解任务: ${task.description}`);
+
+        // 生成 prompt（应用学习）
+        const prompt = await this.promptGenerator.generate(task);
+
+        // 选择 Agent
+        const agentType = this.agentSelector.select(task);
+        console.log(`   选择 Agent: ${agentType}`);
+
+        // 启动 Agent
+        const taskWithAgent = { ...task, agent: agentType };
+        await this.taskManager.save(taskWithAgent);
+
+        const result = await this.agentSpawner.spawn(taskWithAgent, prompt);
+
+        if (result.success) {
+          await this.contextLoader.markIterationProcessed(iteration.id);
+          console.log(`   ✅ 任务启动成功`);
+        } else {
+          console.error(`   ❌ 任务启动失败: ${result.error || result.errors?.join(', ')}`);
+        }
+      }
+    }
+  }
+
+  /**
+   * 拆解迭代需求为任务
+   */
+  private async decomposeIteration(iteration: any): Promise<Task[]> {
+    // 这里调用 Claude 来理解需求并拆解任务
+    // 暂时返回示例任务，实际需要与 API 集成
+
+    const baseTask: Partial<Task> = {
+      iterationId: iteration.id,
+      createdAt: Date.now(),
+      retries: 0,
+      status: 'pending',
+    };
+
+    // 根据需求类型拆解
+    const tasks: Task[] = [];
+
+    // 示例：如果需求包含"平台"或"系统"
+    if (iteration.content.includes('平台') || iteration.content.includes('系统')) {
+      tasks.push({
+        id: `task-${Date.now()}-1`,
+        type: 'feature',
+        priority: 'high',
+        description: '设计系统架构',
+        requirements: ['考虑可扩展性', '支持多种媒体类型'],
+        context: {
+          iterationId: iteration.id,
+          customerNotes: iteration.content,
+        },
+        ...baseTask,
+      } as Task);
+
+      tasks.push({
+        id: `task-${Date.now()}-2`,
+        type: 'feature',
+        priority: 'high',
+        description: '实现视频上传功能',
+        requirements: ['支持多种格式', '上传进度显示', '错误处理'],
+        context: {
+          iterationId: iteration.id,
+        },
+        ...baseTask,
+      } as Task);
+    }
+
+    // 如果需求包含"评论"
+    if (iteration.content.includes('评论')) {
+      tasks.push({
+        id: `task-${Date.now()}-3`,
+        type: 'feature',
+        priority: 'medium',
+        description: '实现评论系统',
+        requirements: ['实时更新', '点赞/回复', '内容审核'],
+        context: {
+          iterationId: iteration.id,
+        },
+        ...baseTask,
+      } as Task);
+    }
+
+    return tasks;
+  }
+
+  /**
+   * 监控正在运行的任务
+   */
+  private async monitorRunningTasks(): Promise<void> {
+    const runningTasks = await this.taskManager.getRunningTasks();
+
+    console.log(`\n🔍 监控 ${runningTasks.length} 个运行中的任务`);
+
+    for (const task of runningTasks) {
+      const status = await this.agentSpawner.checkStatus(task);
+
+      if (status.completed) {
+        console.log(`   ✅ 任务完成: ${task.id}`);
+        task.status = 'completed';
+        task.completedAt = Date.now();
+        task.prUrl = status.prUrl;
+        await this.taskManager.update(task);
+      } else if (status.failed) {
+        console.log(`   ❌ 任务失败: ${task.id}`);
+        task.status = 'failed';
+        await this.taskManager.update(task);
+      } else {
+        console.log(`   ⏳ 运行中: ${task.id}`);
+      }
+    }
+  }
+
+  /**
+   * 重试失败的任务（应用学习）
+   */
+  private async retryFailedTasks(): Promise<void> {
+    const failedTasks = await this.taskManager.getFailedTasks();
+
+    for (const task of failedTasks) {
+      if (task.retries >= this.config.maxRetries) {
+        console.log(`\n⚠️  任务 ${task.id} 达到最大重试次数，放弃`);
+        continue;
+      }
+
+      console.log(`\n🔄 重试任务 ${task.id} (第 ${task.retries + 1} 次)`);
+
+      // 从失败中学习，调整 prompt
+      const improvedPrompt = await this.learningEngine.improvePrompt(task);
+
+      // 重试
+      const result = await this.agentSpawner.spawn(task, improvedPrompt);
+
+      task.retries++;
+
+      if (result.success) {
+        task.status = 'running';
+        await this.taskManager.update(task);
+        console.log(`   ✅ 重试成功`);
+      } else {
+        await this.taskManager.update(task);
+        console.log(`   ❌ 重试失败: ${result.error || result.errors?.join(', ')}`);
+      }
+    }
+  }
+
+  /**
+   * 从结果中学习
+   */
+  private async learnFromResults(): Promise<void> {
+    const completedTasks = await this.taskManager.getCompletedTasks();
+
+    for (const task of completedTasks) {
+      await this.learningEngine.recordSuccess(task);
+    }
+
+    await this.learningEngine.saveLearnings();
+  }
+}
+
+// 启动编排器
+const orchestrator = new Orchestrator();
+orchestrator.start().catch(console.error);
