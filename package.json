@@ -8,6 +8,7 @@
     "dev": "ts-node src/orchestrator/index.ts",
     "start": "node dist/orchestrator/index.js",
     "orchestrator": "ts-node src/orchestrator/index.ts",
+    "orchestrator:enhanced": "ts-node src/orchestrator/index-enhanced.ts",
     "monitor": "node dist/monitors/task-monitor.js",
     "health-check": "node dist/monitors/health-check.js",
     "test": "node dist/orchestrator/test-runner.js",
